@@ -1,7 +1,8 @@
 (() => {
   "use strict";
 
-  const API_BASE = "https";
+  // Point this at your running backend. Change before deploying.
+  const API_BASE = "http://localhost:8000";
 
   const form = document.getElementById("predict-form");
   const submitBtn = document.getElementById("submit-btn");
@@ -22,15 +23,12 @@
 
   const GAUGE_ARC_LENGTH = 314; // approx pi * r(100)
 
-  // ---------------------------------------------------------
-  // Draw tick marks on both gauges (0..10, every 2 units)
-  // ---------------------------------------------------------
   function drawTicks() {
     document.querySelectorAll(".gauge-ticks").forEach((g) => {
       g.innerHTML = "";
       const cx = 120, cy = 140, rOuter = 100, rInner = 90;
       for (let i = 0; i <= 10; i += 2) {
-        const angle = Math.PI - (i / 10) * Math.PI; // 180deg -> 0deg
+        const angle = Math.PI - (i / 10) * Math.PI;
         const x1 = cx + rOuter * Math.cos(angle);
         const y1 = cy - rOuter * Math.sin(angle);
         const x2 = cx + rInner * Math.cos(angle);
@@ -46,9 +44,6 @@
   }
   drawTicks();
 
-  // ---------------------------------------------------------
-  // Segmented control (stress_level) wiring
-  // ---------------------------------------------------------
   const segGroup = document.getElementById("stress_level_group");
   const stressHiddenInput = document.getElementById("stress_level");
   segGroup.querySelectorAll(".seg-btn").forEach((btn) => {
@@ -60,9 +55,6 @@
     });
   });
 
-  // ---------------------------------------------------------
-  // Field-level error helpers
-  // ---------------------------------------------------------
   function fieldWrapper(input) {
     return input.closest(".field");
   }
@@ -88,9 +80,6 @@
     form.querySelectorAll(".error-msg").forEach((m) => (m.textContent = ""));
   }
 
-  // ---------------------------------------------------------
-  // Client-side validation mirroring the StudentData model
-  // ---------------------------------------------------------
   function validate(payload) {
     const errors = [];
 
@@ -128,11 +117,16 @@
   }
 
   // ---------------------------------------------------------
-  // Gather form data into the exact StudentData shape
+  // Gather form data AND translate into the backend's exact
+  // PascalCase field names (StudentData expects Age, Gender,
+  // Avg_Daily_Usage_Hours, Stress_Level, etc. — not snake_case).
+  // We still read the DOM using the original lowercase ids so
+  // the HTML/validation above doesn't need to change.
   // ---------------------------------------------------------
   function collectPayload() {
     const fd = new FormData(form);
-    return {
+    // Internal snake_case shape, used for client-side validation only.
+    const internal = {
       age: fd.get("age") === "" ? NaN : parseInt(fd.get("age"), 10),
       gender: fd.get("gender") || "",
       country: (fd.get("country") || "").trim(),
@@ -146,11 +140,28 @@
       sleep_hours_per_night: fd.get("sleep_hours_per_night") === "" ? NaN : parseFloat(fd.get("sleep_hours_per_night")),
       stress_level: fd.get("stress_level") || "",
     };
+    return internal;
   }
 
-  // ---------------------------------------------------------
-  // UI state switching
-  // ---------------------------------------------------------
+  // Converts the internal snake_case shape into the exact PascalCase
+  // keys the FastAPI/Pydantic StudentData model expects.
+  function toApiPayload(internal) {
+    return {
+      Age: internal.age,
+      Gender: internal.gender,
+      Country: internal.country,
+      Academic_Level: internal.academic_level,
+      Most_Used_Platform: internal.most_used_platform,
+      Purpose_Of_Use: internal.purpose_of_use,
+      Avg_Daily_Usage_Hours: internal.avg_daily_usage_hours,
+      Daily_Unlocks: internal.daily_unlocks,
+      Study_Hours: internal.study_hours,
+      Physical_Activity_Hours: internal.physical_activity_hours,
+      Sleep_Hours_Per_Night: internal.sleep_hours_per_night,
+      Stress_Level: internal.stress_level,
+    };
+  }
+
   function showState(name) {
     [stateIdle, stateLoading, stateResult, stateError].forEach((el) => (el.hidden = true));
     ({ idle: stateIdle, loading: stateLoading, result: stateResult, error: stateError }[name]).hidden = false;
@@ -188,7 +199,6 @@
     scoreBandEl.textContent = label;
     scoreContextEl.textContent = context;
 
-    // reset then animate the arc fill on next frame
     gaugeFill.style.transition = "none";
     gaugeFill.style.strokeDashoffset = String(GAUGE_ARC_LENGTH);
     requestAnimationFrame(() => {
@@ -206,17 +216,34 @@
     showState("error");
   }
 
-  // ---------------------------------------------------------
-  // Parse FastAPI / Pydantic 422 error responses into
-  // field-level messages where possible
-  // ---------------------------------------------------------
+  // Maps a PascalCase field name back to its DOM element id (lowercase)
+  // so server-side validation errors can highlight the right input.
+  function apiFieldToElementId(field) {
+    const map = {
+      Age: "age",
+      Gender: "gender",
+      Country: "country",
+      Academic_Level: "academic_level",
+      Most_Used_Platform: "most_used_platform",
+      Purpose_Of_Use: "purpose_of_use",
+      Avg_Daily_Usage_Hours: "avg_daily_usage_hours",
+      Daily_Unlocks: "daily_unlocks",
+      Study_Hours: "study_hours",
+      Physical_Activity_Hours: "physical_activity_hours",
+      Sleep_Hours_Per_Night: "sleep_hours_per_night",
+      Stress_Level: "stress_level",
+    };
+    return map[field] || field;
+  }
+
   function applyServerValidationErrors(detail) {
     if (!Array.isArray(detail)) return false;
     let matched = false;
     detail.forEach((err) => {
-      const field = Array.isArray(err.loc) ? err.loc[err.loc.length - 1] : null;
-      const input = field ? document.getElementById(field) : null;
-      const target = field === "stress_level" ? stressHiddenInput : input;
+      const apiField = Array.isArray(err.loc) ? err.loc[err.loc.length - 1] : null;
+      const elementId = apiField ? apiFieldToElementId(apiField) : null;
+      const input = elementId ? document.getElementById(elementId) : null;
+      const target = elementId === "stress_level" ? stressHiddenInput : input;
       if (target) {
         setFieldError(target, err.msg || "Invalid value.");
         matched = true;
@@ -225,21 +252,20 @@
     return matched;
   }
 
-  // ---------------------------------------------------------
-  // Submit handler
-  // ---------------------------------------------------------
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     clearAllErrors();
 
-    const payload = collectPayload();
-    const clientErrors = validate(payload);
+    const internalPayload = collectPayload();
+    const clientErrors = validate(internalPayload);
 
     if (clientErrors.length > 0) {
       clientErrors.forEach(([input, msg]) => input && setFieldError(input, msg));
       clientErrors[0][0]?.focus?.();
       return;
     }
+
+    const apiPayload = toApiPayload(internalPayload);
 
     setSubmitting(true);
     showState("loading");
@@ -248,7 +274,7 @@
       const res = await fetch(`${API_BASE}/predict`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(apiPayload),
       });
 
       if (res.status === 422) {
@@ -272,23 +298,24 @@
       }
 
       const data = await res.json();
-      if (typeof data.predicted_mental_health_score !== "number") {
+      // Must match the backend's PredictionResponse field name exactly:
+      // "prediction_mental_health_score" (not "predicted_...").
+      if (typeof data.prediction_mental_health_score !== "number") {
         renderError("Unexpected response", "The API responded, but the score was missing or malformed.");
         return;
       }
 
-      renderResult(data.predicted_mental_health_score);
+      renderResult(data.prediction_mental_health_score);
     } catch (err) {
       renderError(
         "Can't reach the server",
-        `Couldn't connect to ${API_BASE}. Make sure the backend is running (uvicorn main:app --port 2200 --reload) and reachable from this page.`
+        `Couldn't connect to ${API_BASE}. Make sure the backend is running (uvicorn main:app --reload --port 8000) and reachable from this page.`
       );
     } finally {
       setSubmitting(false);
     }
   });
 
-  // live-clear errors as the user edits
   form.querySelectorAll("input, select").forEach((el) => {
     el.addEventListener("input", () => clearFieldError(el));
     el.addEventListener("change", () => clearFieldError(el));
